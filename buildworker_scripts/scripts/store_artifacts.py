@@ -3,6 +3,7 @@
 # Distributed under license.
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -77,8 +78,8 @@ class MenderSession(object):
             log.error("%s" % err.stderr)
 
 
-# noinspection PyBroadException,DuplicatedCode,DuplicatedCode
-def copy_recursive(topdir, subdir, s3, destpath, filepat=None, tarball=False):
+# noinspection PyBroadException,DuplicatedCode
+def copy_recursive(topdir, subdirglob, s3, destpath, filepat=None, tarball=False):
     """
     Walks a subdirectory under the build directory and copies all matching
     files under that subdirectory.  Symlinks are skipped, and if 'filepat'
@@ -96,49 +97,50 @@ def copy_recursive(topdir, subdir, s3, destpath, filepat=None, tarball=False):
         pat = re.compile(filepat)
     else:
         pat = None
-    root = os.path.join(topdir, subdir)
-    for dirpath, _, filenames in os.walk(root):
-        for filename in filenames:
-            if pat and not pat.match(filename):
-                continue
-            localfile = os.path.join(dirpath, filename)
-            if os.path.islink(localfile):
-                if filename.endswith('.mender'):
-                    if mendersession is None:
-                        mendersession = MenderSession()
-                    desc = os.path.splitext(filename)[0]
-                    machine = dirpath[len(root) + 1:]
-                    if len(machine) > 0 and desc.endswith(machine):
-                        desc = desc[:len(desc) - len(machine) - 1]
-                    mendersession.upload(localfile, description=desc)
-                    copy_count += 1
-                continue
-            elif filename.endswith('.mender'):
-                # We use the symlinks for mender uploads
-                continue
-            relpath = localfile[len(root) + 1:]
+    for subdir in glob.iglob(subdirglob):
+        root = os.path.join(topdir, subdir)
+        for dirpath, _, filenames in os.walk(root):
+            for filename in filenames:
+                if pat and not pat.match(filename):
+                    continue
+                localfile = os.path.join(dirpath, filename)
+                if os.path.islink(localfile):
+                    if filename.endswith('.mender'):
+                        if mendersession is None:
+                            mendersession = MenderSession()
+                        desc = os.path.splitext(filename)[0]
+                        machine = dirpath[len(root) + 1:]
+                        if len(machine) > 0 and desc.endswith(machine):
+                            desc = desc[:len(desc) - len(machine) - 1]
+                        mendersession.upload(localfile, description=desc)
+                        copy_count += 1
+                        continue
+                elif filename.endswith('.mender'):
+                    # We use the symlinks for mender uploads
+                    continue
+                relpath = localfile[len(topdir) + 1:]
 
-            copy_count += 1
-            if tarball:
-                filelist.write(relpath + '\n')
-            elif s3:
-                s3.upload(localfile, destpath + "/" + relpath)
-                log.verbose('Uploaded %s -> %s' % (localfile, destpath + "/" + relpath))
-            elif destpath:
-                full_destpath = os.path.join(destpath, relpath)
-                os.makedirs(os.path.dirname(full_destpath), exist_ok=True)
-                try:
-                    shutil.copy(localfile, full_destpath)
-                    log.verbose('Copied %s -> %s' % (localfile, full_destpath))
-                except IOError as err:
-                    log.warn('Error occurred copying %s to %s: %s (%d)',
-                             localfile, full_destpath, err.strerror, err.errno)
+                copy_count += 1
+                if tarball:
+                    filelist.write(relpath + '\n')
+                elif s3:
+                    s3.upload(localfile, destpath + "/" + relpath)
+                    log.verbose('Uploaded %s -> %s' % (localfile, destpath + "/" + relpath))
+                elif destpath:
+                    full_destpath = os.path.join(destpath, relpath)
+                    os.makedirs(os.path.dirname(full_destpath), exist_ok=True)
+                    try:
+                        shutil.copy(localfile, full_destpath)
+                        log.verbose('Copied %s -> %s' % (localfile, full_destpath))
+                    except IOError as err:
+                        log.warn('Error occurred copying %s to %s: %s (%d)',
+                                 localfile, full_destpath, err.strerror, err.errno)
     if tarball:
         flname = filelist.name
         filelist.close()
-        tarballname = os.path.join(topdir, os.path.basename(subdir) + '.tar.gz')
+        tarballname = os.path.join(topdir, os.path.basename(subdirglob) + '.tar.gz')
         try:
-            cmd = ['tar', '-c', '-C', root, '--files-from', flname, '-z', '-f', tarballname]
+            cmd = ['tar', '-c', '-C', topdir, '--files-from', flname, '-z', '-f', tarballname]
             if log.verbosity or log.debug_level > 0:
                 cmd.append('-v')
             output, errors = process.run(cmd)
@@ -221,13 +223,13 @@ def main():
     destpath += "/" + args.distro + "/" + args.buildername + "/" + args.build_tag
     for artifact in args.artifacts.lower().split(','):
         if artifact == 'images':
-            copy_recursive(args.builddir, 'tmp/deploy/images', s3, destpath + "/images")
+            copy_recursive(args.builddir, 'tmp*/deploy/images', s3, destpath + "/images")
             continue
         if artifact == 'mender-only':
-            copy_recursive(args.builddir, 'tmp/deploy/images', None, None, filepat=r'.*\.mender$')
+            copy_recursive(args.builddir, 'tmp*/deploy/images', None, None, filepat=r'.*\.mender$')
             continue
         if artifact == 'stamps':
-            copy_recursive(args.builddir, 'tmp/stamps', s3, destpath,
+            copy_recursive(args.builddir, 'tmp*/stamps', s3, destpath,
                            filepat=r'.*sigdata.*', tarball=True)
             continue
         if artifact == 'buildhistory':
@@ -235,7 +237,7 @@ def main():
                            tarball=True)
             continue
         if artifact == 'sdk':
-            copy_recursive(args.builddir, 'tmp/deploy/sdk', s3, destpath + "/sdk")
+            copy_recursive(args.builddir, 'tmp*/deploy/sdk', s3, destpath + "/sdk")
             continue
         log.warn('Unrecognized artifact requested: %s' % artifact)
     return 0
