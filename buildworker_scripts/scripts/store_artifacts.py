@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2019-2020 by Matthew Madison
+# Copyright 2019-2026 by Matthew Madison
 # Distributed under license.
 
 import argparse
@@ -12,7 +12,8 @@ import sys
 import tempfile
 import urllib
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Optional
 
 import botocore
 import botocore.session
@@ -48,7 +49,7 @@ class MenderSession(object):
         except process.ExecutionError as err:
             log.error("%s" % err.stderr)
 
-    def upload(self, filename, description=None):
+    def upload(self, filename: str, description: Optional[str]=None):
         try:
             st = os.stat(filename)
         except OSError as err:
@@ -68,9 +69,9 @@ class MenderSession(object):
                'https://hosted.mender.io/api/management/v1/deployments/artifacts']
         try:
             log.verbose("Uploading %s to mender..." % filename)
-            starttime = datetime.utcnow()
+            starttime = datetime.now(timezone.utc)
             output, errors = process.run(cmd)
-            log.verbose("Upload time: {}".format(datetime.utcnow() - starttime))
+            log.verbose("Upload time: {}".format(datetime.now(timezone.utc) - starttime))
             log.verbose(output.rstrip())
         except (process.CmdError, process.NotFoundError) as err:
             log.error("%s" % err)
@@ -78,8 +79,8 @@ class MenderSession(object):
             log.error("%s" % err.stderr)
 
 
-# noinspection PyBroadException,DuplicatedCode
-def copy_recursive(topdir, subdirglob, s3, destpath, filepat=None, tarball=False):
+def copy_recursive(topdir: str, subdirglob: str, s3: Optional[s3session.S3Session],
+                   destpath: Optional[str], filepat: Optional[str]=None, tarball: bool=False):
     """
     Walks a subdirectory under the build directory and copies all matching
     files under that subdirectory.  Symlinks are skipped, and if 'filepat'
@@ -121,11 +122,14 @@ def copy_recursive(topdir, subdirglob, s3, destpath, filepat=None, tarball=False
                 relpath = localfile[len(topdir) + 1:]
 
                 copy_count += 1
-                if tarball:
+                if filelist:
                     filelist.write(relpath + '\n')
                 elif s3:
-                    s3.upload(localfile, destpath + "/" + relpath)
-                    log.verbose('Uploaded %s -> %s' % (localfile, destpath + "/" + relpath))
+                    if destpath:
+                        s3.upload(localfile, destpath + "/" + relpath)
+                        log.verbose('Uploaded %s -> %s' % (localfile, destpath + "/" + relpath))
+                    else:
+                        log.error('S3 upload requested with no destination path')
                 elif destpath:
                     full_destpath = os.path.join(destpath, relpath)
                     os.makedirs(os.path.dirname(full_destpath), exist_ok=True)
@@ -135,7 +139,7 @@ def copy_recursive(topdir, subdirglob, s3, destpath, filepat=None, tarball=False
                     except IOError as err:
                         log.warn('Error occurred copying %s to %s: %s (%d)',
                                  localfile, full_destpath, err.strerror, err.errno)
-    if tarball:
+    if filelist:
         flname = filelist.name
         filelist.close()
         tarballname = os.path.join(topdir, os.path.basename(subdirglob) + '.tar.gz')
@@ -146,9 +150,12 @@ def copy_recursive(topdir, subdirglob, s3, destpath, filepat=None, tarball=False
             output, errors = process.run(cmd)
             log.verbose(output.rstrip())
             if s3:
-                s3.upload(tarballname, destpath + "/" + os.path.basename(tarballname))
+                if destpath:
+                    s3.upload(tarballname, destpath + "/" + os.path.basename(tarballname))
+                else:
+                    log.error("S3 upload requested with no destination path")
             else:
-                full_destpath = os.path.join(destpath, os.path.basename(tarballname))
+                full_destpath = os.path.join(destpath or "", os.path.basename(tarballname))
                 os.makedirs(os.path.dirname(full_destpath), exist_ok=True)
                 try:
                     shutil.copy(tarballname, full_destpath)
@@ -229,11 +236,15 @@ def main():
             copy_recursive(args.builddir, 'tmp*/deploy/images', None, None, filepat=r'.*\.mender$')
             continue
         if artifact == 'stamps':
-            copy_recursive(args.builddir, 'tmp*/stamps', s3, destpath,
+            copy_recursive(args.builddir, 'tmp*/stamps', s3, destpath + "",
                            filepat=r'.*sigdata.*', tarball=True)
             continue
         if artifact == 'buildhistory':
-            copy_recursive(args.builddir, 'buildhistory', s3, destpath,
+            copy_recursive(args.builddir, 'buildhistory', s3, destpath + "",
+                           tarball=True)
+            continue
+        if artifact == 'buildstats':
+            copy_recursive(args.builddir, 'tmp/buildstats', s3, destpath + "",
                            tarball=True)
             continue
         if artifact == 'sdk':
